@@ -1,0 +1,18 @@
+# Local overrides
+config.env
+mushunuri_ilae_pipeline/config.env
+.gene/
+
+# Recreated by ./gene install or pipeline scripts (large binaries, sumstats, LD ref)
+mushunuri_ilae_pipeline/data/
+mushunuri_ilae_pipeline/results/
+mushunuri_ilae_pipeline/tools/
+
+# Archives and paper PDFs (fetch separately)
+*.pdf
+*.zip
+*.tar.gz
+
+__pycache__/
+*.pyc
+.DS_Store

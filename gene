@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# Gene-epi pipeline CLI: install refs, run MAGMA batch, logs, health checks.
+set -euo pipefail
+
+GENE_ROOT="$(cd "$(dirname "$0")" && pwd)"
+PIPE="${GENE_ROOT}/mushunuri_ilae_pipeline"
+STATE="${GENE_ROOT}/.gene"
+PID_FILE="${STATE}/pipeline.pid"
+LOG_FILE="${STATE}/pipeline.log"
+CMD="${1:-help}"
+
+die() { echo "gene: $*" >&2; exit 1; }
+
+ensure_pipe() {
+  [[ -d "$PIPE" ]] || die "missing pipeline directory: $PIPE"
+}
+
+run_in_pipe() {
+  ensure_pipe
+  ( cd "$PIPE" && "$@" )
+}
+
+cmd_help() {
+  cat <<EOF
+Usage: ./gene <command>
+
+  install   Download MAGMA, refs, e/H-MAGMA assets, ILAE sumstats; normalize
+            H-MAGMA annot paths; build p-value files (GGE, FE, ALL). Optional
+            conda env from mushunuri_ilae_pipeline/environment.yml.
+  start     Run MAGMA gene analysis for GGE, FE, ALL in the background (logs → .gene/pipeline.log).
+  stop      Stop the background pipeline process started by ./gene start.
+  logs      Follow .gene/pipeline.log (Ctrl+C to exit).
+  checks    Verify binaries, reference data, prepared inputs, and result files.
+
+Environment:
+  CONDA_EXE   Path to conda (default: conda on PATH)
+EOF
+}
+
+cmd_install() {
+  ensure_pipe
+  mkdir -p "$STATE"
+  chmod +x "$PIPE/scripts/"*.sh "$PIPE/scripts/"*.py 2>/dev/null || true
+
+  if [[ ! -f "$PIPE/config.env" ]]; then
+    cp "$PIPE/config.env.example" "$PIPE/config.env"
+    echo "Created $PIPE/config.env"
+  fi
+  # shellcheck source=/dev/null
+  source "$PIPE/config.env"
+
+  if command -v "${CONDA_EXE:-conda}" >/dev/null 2>&1; then
+    echo "=== conda environment (ilae-magma-pipeline) ==="
+    if "${CONDA_EXE:-conda}" run -n ilae-magma-pipeline true 2>/dev/null; then
+      "${CONDA_EXE:-conda}" env update -f "$PIPE/environment.yml" -n ilae-magma-pipeline --prune
+    else
+      "${CONDA_EXE:-conda}" env create -f "$PIPE/environment.yml"
+    fi
+    echo "Activate with: conda activate ilae-magma-pipeline"
+  else
+    echo "conda not on PATH — skip env; use Python 3.10+ and R 4.3+ manually."
+  fi
+
+  echo "=== 01 MAGMA + NCBI37 + g1000 + gene_info ==="
+  run_in_pipe bash scripts/01_download_magma_and_reference.sh
+
+  echo "=== 02 eMAGMA + H-MAGMA archives ==="
+  run_in_pipe bash scripts/02_download_emagma_hmagma_assets.sh
+
+  echo "=== normalize H-MAGMA → hmagma_std ==="
+  run_in_pipe bash scripts/normalize_hmagma_std.sh
+
+  echo "=== 03 ILAE3 sumstats ==="
+  run_in_pipe bash scripts/03_download_ilae_sumstats.sh
+
+  # shellcheck source=/dev/null
+  source "$PIPE/config.env"
+  ILAE_DIR="${ILAE_SUMSTATS_DIR:-$PIPE/data/ilae3_sumstats}"
+  PREP="${MAGMADIR:-$PIPE/tools/magma}/prepared"
+  export ILAE_DEFAULT_N="${ILAE_DEFAULT_N:-82500}"
+
+  echo "=== 04 prepare GWAS → MAGMA pval (3 columns) ==="
+  for spec in \
+    "GGE:data/ilae3_sumstats/ILAE3_Caucasian_GGE_final.tbl" \
+    "FE:data/ilae3_sumstats/ILAE3_Caucasian_focal_epilepsy_final.tbl" \
+    "ALL:data/ilae3_sumstats/ILAE3_Caucasian_all_epilepsy_final.tbl"; do
+    L="${spec%%:*}"
+    F="${spec#*:}"
+    if [[ ! -f "$PIPE/$F" ]]; then
+      echo "SKIP $L — not found: $PIPE/$F"
+      continue
+    fi
+    run_in_pipe python3 scripts/04_prepare_gwas_for_magma.py \
+      --input "$PIPE/$F" --label "$L" --out-dir "$PREP"
+  done
+
+  if [[ ! -f "${MAGMADIR:-$PIPE/tools/magma}/annot/me_magma.genes.annot" ]]; then
+    echo "ME-MAGMA annot not present. Build with (long run):
+  python3 $PIPE/scripts/10_stream_me_magma_from_schulz_imputed.py \\
+    --meqtl-zip $PIPE/data/raw/schulz2017/NatCommun_Schulz2017_ImputedSNPs_meQTLs.zip \\
+    --manifest $PIPE/data/raw/GPL13534_HumanMethylation450_15017482_v1-1.csv \\
+    --gene-info ${MAGMADIR:-$PIPE/tools/magma}/ref/Homo_sapiens.gene_info.gz \\
+    --max-p 1e-4 --out ${MAGMADIR:-$PIPE/tools/magma}/annot/me_magma.genes.annot"
+  fi
+
+  echo "=== install finished ==="
+  ./gene checks || true
+}
+
+cmd_start() {
+  ensure_pipe
+  mkdir -p "$STATE"
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    die "already running (pid $(cat "$PID_FILE")). ./gene stop first or rm $PID_FILE"
+  fi
+  local runner="${STATE}/run_pipeline.sh"
+  cat >"$runner" <<EOS
+#!/usr/bin/env bash
+set -euo pipefail
+PIPE="$PIPE"
+cd "\$PIPE"
+# shellcheck source=/dev/null
+source "\$PIPE/config.env"
+export MAGMADIR="\${MAGMADIR:-\$PIPE/tools/magma}"
+bash "\$PIPE/scripts/05_run_magma_family.sh" GGE
+bash "\$PIPE/scripts/05_run_magma_family.sh" FE
+bash "\$PIPE/scripts/05_run_magma_family.sh" ALL
+echo "pipeline: all phenotypes finished at \$(date -Iseconds)"
+EOS
+  chmod +x "$runner"
+  echo "Logging to $LOG_FILE"
+  nohup "$runner" >>"$LOG_FILE" 2>&1 &
+  echo $! >"$PID_FILE"
+  echo "Started pid $(cat "$PID_FILE"). Follow with: ./gene logs"
+}
+
+cmd_stop() {
+  [[ -f "$PID_FILE" ]] || die "no pid file — nothing to stop"
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "Stopping pid $pid and child MAGMA jobs..."
+    pkill -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$PID_FILE"
+  # Orphan magma processes for this tree
+  pkill -f "$PIPE/tools/magma/bin/magma" 2>/dev/null || true
+  echo "Stopped."
+}
+
+cmd_logs() {
+  if [[ ! -f "$LOG_FILE" ]]; then
+    echo "No $LOG_FILE yet — run ./gene start (or ./gene install if inputs are missing)." >&2
+    exit 1
+  fi
+  tail -n 80 "$LOG_FILE"
+  echo "--- tail -f (Ctrl+C to exit) ---"
+  tail -f "$LOG_FILE"
+}
+
+cmd_checks() {
+  ensure_pipe
+  # shellcheck source=/dev/null
+  [[ -f "$PIPE/config.env" ]] && source "$PIPE/config.env"
+  MAGMADIR="${MAGMADIR:-$PIPE/tools/magma}"
+  ok=0
+
+  check() {
+    if "$@"; then
+      echo "[ok]" "$*"
+    else
+      echo "[!!]" "$*" >&2
+      ok=1
+    fi
+  }
+
+  if [[ -x "$MAGMADIR/bin/magma" ]]; then
+    echo "[ok] $MAGMADIR/bin/magma — $( "$MAGMADIR/bin/magma" --version 2>&1 | head -1 )"
+  else
+    echo "[!!] magma binary missing" >&2
+    ok=1
+  fi
+  check test -f "$MAGMADIR/ref/g1000_eur.bim"
+  check test -f "$MAGMADIR/ref/NCBI37.3.gene.loc"
+  check test -f "$MAGMADIR/ref/Homo_sapiens.gene_info.gz"
+  check test -f "$MAGMADIR/annot/hmagma_std/MAGMA.genes.annot"
+  check test -f "$MAGMADIR/annot/emagma/Brain_Hippocampus.genes.annot"
+  check test -f "$MAGMADIR/annot/hmagma_std/Adult_brain.genes.annot"
+  check test -f "$MAGMADIR/annot/hmagma_std/Fetal_brain.genes.annot"
+  check test -f "$MAGMADIR/prepared/GGE_magma.pval"
+  check test -f "$MAGMADIR/prepared/FE_magma.pval"
+  check test -f "$MAGMADIR/prepared/ALL_magma.pval"
+
+  n="$(find "$PIPE/results" -name '*.genes.out' 2>/dev/null | grep -v '_magma_ncol' | wc -l)"
+  if [[ "$n" -ge 15 ]]; then
+    echo "[ok] genes.out count $n (expected 15 for 3 phenotypes × 5 annotations)"
+  else
+    echo "[!!] genes.out count $n (expected 15 when complete)" >&2
+    ok=1
+  fi
+
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "[..] background pipeline pid $(cat "$PID_FILE") running"
+  fi
+
+  exit "$ok"
+}
+
+cd "$GENE_ROOT"
+case "$CMD" in
+  install) cmd_install ;;
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  logs) cmd_logs ;;
+  checks) cmd_checks ;;
+  help|-h|--help) cmd_help ;;
+  *) die "unknown command: $CMD (try ./gene help)" ;;
+esac

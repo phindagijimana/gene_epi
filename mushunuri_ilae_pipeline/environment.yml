@@ -1,0 +1,15 @@
+# Optional conda environment for Python + R helpers.
+# MAGMA itself is a standalone binary from CTG CNCR (installed by scripts/01).
+name: ilae-magma-pipeline
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.10
+  - pip
+  - pandas>=2.0
+  - numpy
+  - pyarrow
+  - openpyxl
+  - r-base>=4.3
+  - r-tidyverse
