@@ -16,3 +16,7 @@ mushunuri_ilae_pipeline/tools/
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local reviewer tooling (not part of the published pipeline)
+export_builder_review_docx.py
+build_reviewer.docx

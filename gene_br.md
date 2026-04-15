@@ -105,11 +105,9 @@ The stack is **strong for transparent, public-data gene follow-up** on ILAE GWAS
 
 - Mushunuri et al. 2026 *Epilepsia* (DOI above).
 - `gene_summary.md` — short paper summary in this folder.
-- `mushunuri_ilae_pipeline/README.md` — install, sources, CLI.
+- [README.md](README.md) — repo overview; [USER_GUIDE.md](USER_GUIDE.md) — full pipeline guide.
 - MAGMA: https://cncr.nl/research/magma/
 - ILAE / EPIGAD: https://www.epigad.org/
-
-Regenerate the Word handoff: `python3 export_builder_review_docx.py` → `build_reviewer.docx`.
 
 ---
 
